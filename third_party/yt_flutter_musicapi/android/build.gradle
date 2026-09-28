@@ -1,0 +1,178 @@
+group = "com.golanpiyush.yt_flutter_musicapi"
+version = "1.0-SNAPSHOT"
+
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withReader('UTF-8') { reader ->
+        localProperties.load(reader)
+    }
+}
+
+def flutterRoot = localProperties.getProperty('flutter.sdk')
+if (flutterRoot == null) {
+    flutterRoot = "C:/flutter"
+}
+
+buildscript {
+    ext.kotlin_version = "2.1.0"
+    repositories {
+        google()
+        mavenCentral()
+        maven { url "https://chaquo.com/maven" }
+
+    }
+
+    dependencies {
+        classpath("com.android.tools.build:gradle:8.7.3")
+        classpath "com.chaquo.python:gradle:17.0.0"
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version")
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url "https://chaquo.com/maven" }
+
+    }
+}
+
+apply plugin: "com.android.library"
+apply plugin: "kotlin-android"
+apply plugin: "com.chaquo.python"
+
+// PATCH VENDOR (music_app) #3: upstream hardcode keempat ABI di ndk.abiFilters.
+// Akibatnya Chaquopy selalu membangun & membungkus libpython (.so) untuk semua ABI,
+// padahal Flutter --target-platform hanya membatasi libapp/libflutter. Akibatnya APK
+// yang dibangun untuk arm32 saja ikut berisi lib arm64/x86_64 tanpa libapp/libflutter —
+// berujung crash jika terpasang di device arm64 (Android memilih folder ABI terbaik).
+// Sekarang bisa dibatasi lewat property gradle root `targetAbis`
+// (contoh: `targetAbis=armeabi-v7a` di android/gradle.properties, lihat tool/build-arm32.sh).
+// Default (tanpa property) tetap 4 ABI seperti upstream, jadi build universal tak berubah.
+def resolveTargetAbis() {
+    def prop = (findProperty("targetAbis") ?: "").toString().trim()
+    def abis = prop.split(",").collect { it.trim() }.findAll { it }
+    if (abis.isEmpty()) {
+        abis = ["armeabi-v7a", "arm64-v8a", "x86", "x86_64"]
+    }
+    return abis
+}
+
+
+android {
+    namespace = "com.golanpiyush.yt_flutter_musicapi"
+
+    compileSdk = 35
+
+    sourceSets {
+        main {
+            java.srcDirs += "src/main/kotlin"
+            python.srcDir "src/main/python"
+        }
+        test.java.srcDirs += "src/test/kotlin"
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_11
+    }
+
+    sourceSets {
+        main.java.srcDirs += "src/main/kotlin"
+        test.java.srcDirs += "src/test/kotlin"
+    }
+
+    defaultConfig {
+        minSdk = 24
+        ndk {
+            // PATCH VENDOR (music_app) #3: lihat resolveTargetAbis() di atas.
+            abiFilters.clear()
+            resolveTargetAbis().each { abiFilters.add(it) }
+        }
+    }
+    android {
+        lint {
+            abortOnError false
+            checkReleaseBuilds false
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    testOptions {
+        unitTests.all {
+            useJUnitPlatform()
+            testLogging {
+               events "passed", "skipped", "failed", "standardOut", "standardError"
+               outputs.upToDateWhen {false}
+               showStandardStreams = true
+            }
+        }
+    }
+}
+
+// PATCH VENDOR (music_app): upstream menulis buildPython("C:/Python311/python.exe")
+// secara hardcode, sehingga build gagal total di Linux/macOS:
+//   "[C:/Python311/python.exe] is not a valid Python 3.11 command"
+// Build Python wajib tersedia di host dan versinya mengikuti `version` di bawah (3.11).
+// Urutan resolusi: env CHAQUOPY_BUILD_PYTHON -> Windows (default upstream) -> python3.11.
+def resolveBuildPython() {
+    def fromEnv = System.getenv("CHAQUOPY_BUILD_PYTHON")
+    if (fromEnv != null && !fromEnv.trim().isEmpty()) {
+        return fromEnv.trim()
+    }
+    def os = System.getProperty("os.name", "").toLowerCase()
+    if (os.contains("windows")) {
+        return "C:/Python311/python.exe"
+    }
+    return "python3.11"
+}
+
+chaquopy {
+    defaultConfig {
+        version = "3.11"
+        buildPython(resolveBuildPython())
+        pip {
+            install "yt-dlp==2026.03.17" // Latest stable version as of Mar 2026
+            install "ytmusicapi==1.11.5" // Latest stable version as of Jan 2026
+        }
+    }
+}
+
+
+
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlin_version"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3"
+    implementation 'androidx.annotation:annotation:1.7.1'
+    implementation 'com.google.code.gson:gson:2.13.1'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation "com.fasterxml.jackson.core:jackson-databind:2.14.3"
+    implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0" // or latest version
+
+    
+    // PATCH VENDOR (music_app) #2: upstream hardcode path flutter.jar dari cache engine lokal
+    // ($flutterRoot/bin/cache/artifacts/engine/android-arm/flutter.jar). Sejak Flutter modern
+    // artifact itu tidak ada lagi (embedding diambil dari Maven: io.flutter:flutter_embedding_*
+    // yang ditambahkan otomatis oleh Flutter Gradle plugin ke setiap project plugin), sehingga
+    // compileDebugKotlin gagal: "File/directory does not exist: .../android-arm/flutter.jar".
+    // Sekarang baris itu hanya dipakai kalau filenya benar-benar ada (Flutter versi lama).
+    def legacyFlutterJar = file("$flutterRoot/bin/cache/artifacts/engine/android-arm/flutter.jar")
+    if (legacyFlutterJar.exists()) {
+        compileOnly files(legacyFlutterJar)
+    }
+    
+    // Test dependencies
+    testImplementation("org.jetbrains.kotlin:kotlin-test")
+    testImplementation("org.mockito:mockito-core:5.0.0")
+}

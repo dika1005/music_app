@@ -1,0 +1,82 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+Thumbs.db
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ / Android Studio
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# VS Code — pengaturan editor lokal, tidak perlu di-publish
+.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+android/build/
+android/app/build/
+android/.gradle/
+ios/build/
+linux/build/
+macos/build/
+windows/build/
+web/build/
+third_party/**/build/
+third_party/**/.dart_tool/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# === Tambahan proyek MelodyFlow — jangan hapus bagian ini ===
+
+# File lokal spesifik mesin (berisi path SDK komputer ini). Kalau ikut
+# ter-commit, build di komputer lain bisa gagal / menimpa konfigurasi.
+android/local.properties
+
+# Kunci signing rilis — JANGAN PERNAH di-commit ke repo publik!
+*.keystore
+*.jks
+key.properties
+android/key.properties
+android/app/key.properties
+
+# Secret / kredensial
+.env
+*.env
+google-services.json
+GoogleService-Info.plist
+*.pem
+*.p12
+
+# Hasil build (APK bisa >80 MB) — distribusikan lewat GitHub Releases,
+# bukan lewat repo. Lihat tool/build-apks.sh dan tool/build-arm32.sh.
+*.apk
+*.aab
+release_apks/
