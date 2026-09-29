@@ -91,6 +91,32 @@ class PlayerCubit extends Cubit<PlayerState> {
       if (isClosed || state.repeat == mode) return;
       emit(state.copyWith(repeat: mode));
     };
+    // Urutan putar engine (acak) berubah → simpan supaya daftar "berikutnya"
+    // menampilkan lagu dalam urutan yang benar-benar akan diputar.
+    audio.onShuffleOrderChanged = (order) {
+      if (isClosed) return;
+      if (_sameOrder(state.shuffleOrder, order)) return;
+      emit(state.copyWith(shuffleOrder: order));
+    };
+  }
+
+  /// Bandingkan dua urutan putar berdasarkan ISI (List `==` hanya identity).
+  bool _sameOrder(List<int> a, List<int> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// Ambil urutan acak terbaru dari engine (dipakai setelah playlist dimuat /
+  /// di-acak ulang; perubahan lain mengalir lewat [AppAudioHandler.onShuffleOrderChanged]).
+  void _syncShuffleOrder() {
+    if (isClosed) return;
+    final order = audio.shuffleOrder;
+    if (order.isEmpty || _sameOrder(state.shuffleOrder, order)) return;
+    emit(state.copyWith(shuffleOrder: order));
   }
 
   Future<void> playQueue(List<Track> tracks, int start) async {
@@ -133,6 +159,9 @@ class PlayerCubit extends Cubit<PlayerState> {
       }
 
       await audio.playQueue(tracks, safe);
+
+      // Urutan acak engine untuk playlist baru — dipakai UI bila Acak aktif.
+      _syncShuffleOrder();
 
       // Pre-resolve lagu berikutnya di background agar pergantian instan
       unawaited(_preResolveSurrounding(tracks, safe));
@@ -264,15 +293,24 @@ class PlayerCubit extends Cubit<PlayerState> {
   Future<void> next() async {
     if (state.queue.isEmpty) return;
 
-    // Jika antrean utama habis dan ada lagu berikutnya dari rekomendasi upNext
-    if (state.index >= state.queue.length - 1 && state.upNext.isNotEmpty) {
-      await _appendAndPlayNext(state.upNext.first);
+    // Saat acak aktif urutan putar dipegang engine (shuffleIndices): tanya
+    // engine apakah masih ada lagu berikutnya. Jangan pakai aritmetika posisi
+    // (`state.index + 1` / `index >= length - 1`) karena di urutan acak artinya
+    // berbeda — antrean bisa terlihat "habis" padahal mesin masih punya sisa,
+    // atau sebaliknya.
+    if (state.shuffle) {
+      if (audio.hasNext) {
+        await audio.next();
+      } else if (state.upNext.isNotEmpty) {
+        // Urutan acak benar-benar habis → lanjut ke rekomendasi genre.
+        await _appendAndPlayNext(state.upNext.first);
+      }
       return;
     }
 
-    // Jika shuffle aktif, biarkan audio handler melompat sesuai shuffle sequence ExoPlayer
-    if (state.shuffle && audio.hasNext) {
-      await audio.next();
+    // Jika antrean utama habis, otomatis lanjutkan ke lagu berikutnya dari rekomendasi genre yang sama
+    if (state.index >= state.queue.length - 1 && state.upNext.isNotEmpty) {
+      await _appendAndPlayNext(state.upNext.first);
       return;
     }
 
@@ -290,7 +328,7 @@ class PlayerCubit extends Cubit<PlayerState> {
       return;
     }
 
-    if (state.shuffle && audio.hasPrevious) {
+    if (state.shuffle) {
       await audio.previous();
       return;
     }
@@ -304,6 +342,25 @@ class PlayerCubit extends Cubit<PlayerState> {
     }
   }
 
+  /// Putar lagu pada [index] di dalam [queue] (urutan playlist), apa pun mode
+  /// acak yang sedang aktif.
+  ///
+  /// Dipakai "putar sekarang" dari rekomendasi: setelah lagu disisipkan tepat
+  /// setelah lagu aktif, targetnya adalah indeks playlist eksplisit — bukan
+  /// [next] yang saat acak akan mengikuti urutan acak engine.
+  Future<void> jumpToQueueIndex(int index) => _jumpTo(index);
+
+  /// Sisipkan [track] tepat setelah lagu aktif lalu langsung memutarnya.
+  ///
+  /// Dipakai tombol "putar sekarang" pada rekomendasi. Tidak boleh memakai
+  /// [next] karena saat acak aktif [next] mengikuti urutan acak engine, bukan
+  /// lagu yang baru disisipkan.
+  Future<void> playRecommendationNow(Track track) async {
+    final targetIndex = state.index + 1;
+    await playUpNext(track);
+    await jumpToQueueIndex(targetIndex);
+  }
+
   Future<void> seek(Duration pos) async {
     positionNotifier.value = PositionData(pos, positionNotifier.value.duration);
     await audio.seek(pos);
@@ -313,6 +370,15 @@ class PlayerCubit extends Cubit<PlayerState> {
     final newShuffle = !state.shuffle;
     emit(state.copyWith(shuffle: newShuffle));
     audio.setShuffle(newShuffle);
+    if (newShuffle) {
+      // Urutan acak dibuat saat playlist dimuat; acak ulang tiap kali Acak
+      // dinyalakan supaya urutannya benar-benar berbeda, lalu teruskan urutan
+      // baru ke UI.
+      unawaited(audio.reshuffle().then((_) => _syncShuffleOrder()));
+    } else {
+      // Urutan acak tidak relevan lagi → bersihkan supaya UI memakai urutan posisi.
+      emit(state.copyWith(shuffleOrder: const []));
+    }
   }
 
   void cycleRepeat() {

@@ -42,6 +42,74 @@ class _FakeAudio extends AppAudioHandler {
   int skipToCalls = 0;
   int clearQueueCalls = 0;
   int removeRangeCalls = 0;
+  int nextCalls = 0;
+  int previousCalls = 0;
+  int reshuffleCalls = 0;
+  bool? lastShuffleSet;
+
+  /// Meniru `hasNext` engine (urutan acak + mode ulang).
+  bool hasNextResult = true;
+
+  @override
+  bool get hasNext => hasNextResult;
+
+  List<int> _shuffleOrder = const [];
+
+  @override
+  List<int> get shuffleOrder => _shuffleOrder;
+
+  @override
+  void setShuffle(bool enabled) => lastShuffleSet = enabled;
+
+  @override
+  Future<void> reshuffle() async {
+    reshuffleCalls++;
+  }
+
+  @override
+  Future<void> next() async {
+    nextCalls++;
+  }
+
+  @override
+  Future<void> previous() async {
+    previousCalls++;
+  }
+
+  /// Meniru `shuffleIndicesStream` engine: PlayerCubit mengikuti urutan acak
+  /// baru lewat callback ini.
+  void emitShuffleOrder(List<int> order) {
+    _shuffleOrder = order;
+    onShuffleOrderChanged?.call(order);
+  }
+
+  /// Set urutan acak engine TANPA memancarkan callback — untuk menguji jalur
+  /// sinkronisasi eksplisit cubit setelah playlist dimuat.
+  void seedShuffleOrder(List<int> order) => _shuffleOrder = order;
+
+  @override
+  Future<void> removeTrackAt(int index) async {
+    if (index < 0 || index >= sources.length) return;
+    sources.removeAt(index);
+    if (index < _currentIndex) {
+      _currentIndex -= 1;
+    } else if (index == _currentIndex) {
+      _currentIndex = sources.isEmpty ? 0 : _currentIndex.clamp(0, sources.length - 1);
+    }
+  }
+
+  @override
+  Future<void> moveTrack(int currentIndex, int newIndex) async {
+    if (currentIndex < 0 || currentIndex >= sources.length) return;
+    if (newIndex < 0 || newIndex >= sources.length) return;
+    final moved = sources.removeAt(currentIndex);
+    sources.insert(newIndex, moved);
+  }
+
+  @override
+  Future<void> insertTrack(int index, Track track) async {
+    sources.insert(index.clamp(0, sources.length), track);
+  }
 
   void seed(List<Track> tracks) {
     sources
@@ -350,5 +418,207 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 20));
     expect(cubit.state.index, 1);
     expect(cubit.state.current?.id, 'rec');
+  });
+
+  group('urutan acak engine vs daftar UI', () {
+    test('next saat acak aktif mengikuti engine, bukan lompatan posisi', () async {
+      final audio = _FakeAudio();
+      final cubit = PlayerCubit(audio, _FakeRepo());
+      addTearDown(cubit.close);
+
+      final tracks = List.generate(4, (i) => _track('$i', 'Song $i'));
+      cubit.emit(cubit.state.copyWith(queue: tracks, index: 0, shuffle: true));
+      audio.seed(tracks);
+
+      await cubit.next();
+
+      expect(audio.nextCalls, 1,
+          reason: 'urutan acak dipegang engine; cubit tidak boleh melompat ke index+1');
+      expect(audio.skipToCalls, 0);
+    });
+
+    test('previous saat acak aktif mengikuti engine', () async {
+      final audio = _FakeAudio();
+      final cubit = PlayerCubit(audio, _FakeRepo());
+      addTearDown(cubit.close);
+
+      final tracks = List.generate(4, (i) => _track('$i', 'Song $i'));
+      cubit.emit(cubit.state.copyWith(queue: tracks, index: 2, shuffle: true));
+      audio.seed(tracks);
+
+      await cubit.previous();
+
+      expect(audio.previousCalls, 1);
+      expect(audio.skipToCalls, 0);
+    });
+
+    test('next tanpa acak tetap memakai lompatan posisi', () async {
+      final audio = _FakeAudio();
+      final cubit = PlayerCubit(audio, _FakeRepo());
+      addTearDown(cubit.close);
+
+      final tracks = List.generate(3, (i) => _track('$i', 'Song $i'));
+      cubit.emit(cubit.state.copyWith(queue: tracks, index: 0, shuffle: false));
+      audio.seed(tracks);
+
+      await cubit.next();
+
+      expect(audio.nextCalls, 0);
+      expect(audio.skipToCalls, 1);
+      expect(cubit.state.index, 1);
+    });
+
+    test('saat acak aktif, next tidak lompat ke rekomendasi selama urutan acak belum habis',
+        () async {
+      final audio = _FakeAudio();
+      final cubit = PlayerCubit(audio, _FakeRepo());
+      addTearDown(cubit.close);
+
+      final tracks = List.generate(3, (i) => _track('$i', 'Song $i'));
+      final rec = _track('rec', 'Rekomendasi');
+      // index 2 = posisi terakhir, tapi itu urutan POSISI — di urutan acak
+      // engine masih punya sisa lagu.
+      cubit.emit(cubit.state.copyWith(
+        queue: tracks,
+        index: 2,
+        shuffle: true,
+        upNext: [rec],
+      ));
+      audio.seed(tracks);
+      audio.hasNextResult = true;
+
+      await cubit.next();
+
+      expect(audio.nextCalls, 1, reason: 'engine masih punya sisa urutan acak');
+      expect(audio.addTrackCalls, 0);
+      expect(cubit.state.queue.length, 3,
+          reason: 'rekomendasi belum boleh disisipkan selama urutan acak belum habis');
+    });
+
+    test('saat acak aktif di akhir urutan acak, next melanjutkan ke rekomendasi', () async {
+      final audio = _FakeAudio();
+      final cubit = PlayerCubit(audio, _FakeRepo());
+      addTearDown(cubit.close);
+
+      final tracks = List.generate(3, (i) => _track('$i', 'Song $i'));
+      final rec = _track('rec', 'Rekomendasi');
+      cubit.emit(cubit.state.copyWith(
+        queue: tracks,
+        index: 2,
+        shuffle: true,
+        upNext: [rec],
+      ));
+      audio.seed(tracks);
+      audio.hasNextResult = false;
+
+      await cubit.next();
+
+      expect(audio.nextCalls, 0);
+      expect(audio.addTrackCalls, 1);
+      expect(cubit.state.queue.map((t) => t.id).toList(), ['0', '1', '2', 'rec']);
+    });
+
+    test('urutan acak engine tersimpan di state tanpa emit berulang', () async {
+      final audio = _FakeAudio();
+      final cubit = PlayerCubit(audio, _FakeRepo());
+      addTearDown(cubit.close);
+
+      final emissions = <PlayerState>[];
+      final sub = cubit.stream.listen(emissions.add);
+      addTearDown(sub.cancel);
+
+      audio.emitShuffleOrder([2, 0, 1]);
+      audio.emitShuffleOrder([2, 0, 1]); // nilai sama → harus diabaikan
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+
+      expect(cubit.state.shuffleOrder, [2, 0, 1]);
+      expect(emissions.length, 1,
+          reason: 'urutan yang sama tidak boleh memicu rebuild UI');
+    });
+    test('playQueue menyinkronkan urutan acak engine ke state', () async {
+      final audio = _FakeAudio();
+      final cubit = PlayerCubit(audio, _FakeRepo());
+      addTearDown(cubit.close);
+
+      final tracks = List.generate(3, (i) => _track('$i', 'Song $i'));
+      // Urutan diset tanpa callback supaya yang menguji hanya jalur sinkron
+      // eksplisit di playQueue.
+      audio.seedShuffleOrder([1, 2, 0]);
+
+      await cubit.playQueue(tracks, 0);
+
+      expect(cubit.state.shuffleOrder, [1, 2, 0]);
+    });
+
+    test('playRecommendationNow memutar lagu yang disisipkan walau acak aktif', () async {
+      final audio = _FakeAudio();
+      final cubit = PlayerCubit(audio, _FakeRepo());
+      addTearDown(cubit.close);
+
+      final t1 = _track('1', 'Song 1');
+      final t2 = _track('2', 'Song 2');
+      final rec = _track('rec', 'Rekomendasi');
+      cubit.emit(cubit.state.copyWith(
+        queue: [t1, t2],
+        index: 0,
+        shuffle: true,
+        upNext: [rec],
+      ));
+      audio.seed([t1, t2]);
+
+      await cubit.playRecommendationNow(rec);
+
+      expect(cubit.state.current?.id, 'rec',
+          reason: 'harus memutar lagu yang baru disisipkan, bukan urutan acak');
+      expect(audio.nextCalls, 0);
+      expect(audio.skipToCalls, 1);
+    });
+
+    test('toggleShuffle mengacak ulang dan meneruskan urutan baru ke state', () async {
+      final audio = _FakeAudio();
+      final cubit = PlayerCubit(audio, _FakeRepo());
+      addTearDown(cubit.close);
+
+      final tracks = List.generate(3, (i) => _track('$i', 'Song $i'));
+      cubit.emit(cubit.state.copyWith(queue: tracks, index: 0));
+      audio.seed(tracks);
+      audio.emitShuffleOrder([2, 1, 0]);
+
+      cubit.toggleShuffle();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(cubit.state.shuffle, isTrue);
+      expect(audio.lastShuffleSet, isTrue);
+      expect(audio.reshuffleCalls, 1,
+          reason: 'urutan acak harus dibuat ulang tiap kali Acak dinyalakan');
+      expect(cubit.state.shuffleOrder, [2, 1, 0]);
+
+      cubit.toggleShuffle();
+
+      expect(cubit.state.shuffle, isFalse);
+      expect(audio.lastShuffleSet, isFalse);
+      expect(cubit.state.shuffleOrder, isEmpty,
+          reason: 'saat acak nonaktif UI kembali ke urutan posisi');
+    });
+
+    test('menghapus lagu saat acak aktif memakai indeks playlist yang benar', () async {
+      final audio = _FakeAudio();
+      final cubit = PlayerCubit(audio, _FakeRepo());
+      addTearDown(cubit.close);
+
+      final tracks = List.generate(4, (i) => _track('$i', 'Song $i'));
+      cubit.emit(cubit.state.copyWith(queue: tracks, index: 0, shuffle: true));
+      audio.seed(tracks);
+      // Urutan putar 2,0,3,1 → lagu "berikutnya" yang tampil adalah playlist
+      // index 3, bukan index 1. UI harus menghapus lagu yang benar-benar tampil.
+      audio.emitShuffleOrder([2, 0, 3, 1]);
+
+      await cubit.removeFromQueue(3);
+
+      expect(cubit.state.queue.map((t) => t.id).toList(), ['0', '1', '2']);
+      expect(audio.sources.map((t) => t.id).toList(), ['0', '1', '2']);
+      expect(cubit.state.index, 0);
+      expect(cubit.state.current?.id, '0');
+    });
   });
 }

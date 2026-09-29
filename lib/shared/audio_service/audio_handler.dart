@@ -40,10 +40,21 @@ class AppAudioHandler {
   void Function(bool enabled)? onShuffleChanged;
   /// Mode ulang ('off' | 'all' | 'one') berubah dari luar UI aplikasi.
   void Function(String mode)? onRepeatChanged;
+  /// Urutan putar engine berubah (playlist dimuat ulang / acak diaktifkan /
+  /// playlist dimutasi). Isinya indeks [queue] untuk tiap posisi putar.
+  void Function(List<int> order)? onShuffleOrderChanged;
   String _repeat = 'off';
 
   LocalAudioStreamServer get server => _server;
   int get playlistLength => _player?.audioSources.length ?? 0;
+
+  /// Urutan putar yang sedang dipakai engine (indeks di dalam playlist).
+  ///
+  /// Saat acak aktif, urutan ini adalah urutan acak NYATA yang dijalankan
+  /// ExoPlayer — bukan urutan posisi playlist. UI "BERIKUTNYA DALAM ANTREAN"
+  /// memakainya supaya tidak menampilkan lagu yang belum tentu diputar
+  /// berikutnya. Kosong bila playlist belum dimuat.
+  List<int> get shuffleOrder => _player?.shuffleIndices ?? const [];
 
   Future<void> init({Future<String?> Function(String videoId)? onResolveUrl}) async {
     _server.onResolveUrl = onResolveUrl;
@@ -113,6 +124,12 @@ class AppAudioHandler {
       onRepeatChanged?.call(
         mode == LoopMode.one ? 'one' : mode == LoopMode.all ? 'all' : 'off',
       );
+    });
+    // Urutan putar (acak) engine ikut dipancarkan ke UI. Tidak di-`distinct()`
+    // karena perbandingan List memakai identity; deduplikasi dilakukan di
+    // PlayerCubit dengan membandingkan isi.
+    p.shuffleIndicesStream.listen((order) {
+      onShuffleOrderChanged?.call(order);
     });
   }
 
@@ -344,6 +361,19 @@ class AppAudioHandler {
       _player?.setShuffleModeEnabled(enabled);
     } catch (e) {
       debugPrint('setShuffle error: $e');
+    }
+  }
+
+  /// Acak ulang urutan putar playlist tanpa menghentikan lagu aktif maupun
+  /// membangun ulang media session/notifikasi.
+  ///
+  /// just_audio memakai satu urutan acak yang dibuat saat playlist dimuat, jadi
+  /// tanpa ini mengaktifkan Acak berulang kali selalu memberi urutan yang sama.
+  Future<void> reshuffle() async {
+    try {
+      await _player?.shuffle();
+    } catch (e) {
+      debugPrint('reshuffle error: $e');
     }
   }
 

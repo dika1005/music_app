@@ -648,17 +648,49 @@ class _UpNextModalSheet extends StatelessWidget {
           prev.index != curr.index ||
           prev.queue != curr.queue ||
           prev.upNext != curr.upNext ||
-          prev.status != curr.status,
+          prev.status != curr.status ||
+          prev.shuffle != curr.shuffle ||
+          prev.shuffleOrder != curr.shuffleOrder,
       builder: (context, state) {
         final current = state.current;
         final cubit = context.read<PlayerCubit>();
         final currentTitle = current?.title.toLowerCase() ?? '';
         final currentArtist = current?.artist.toLowerCase() ?? '';
 
-        // Remaining queue
-        final remainingQueue = <Track>[];
-        if (state.index >= 0 && state.index < state.queue.length - 1) {
-          remainingQueue.addAll(state.queue.sublist(state.index + 1));
+        // Antrean berikutnya dalam URUTAN PUTAR yang sebenarnya.
+        //
+        // Saat acak aktif, urutan putar dipegang engine audio (shuffleOrder),
+        // jadi urutan posisi `queue` BUKAN urutan yang akan diputar. Memakai
+        // urutan posisi di sini membuat daftar "berikutnya" menipu.
+        final remainingQueue = <_QueuedTrack>[];
+        final shuffleOn = state.shuffle &&
+            state.queue.isNotEmpty &&
+            state.shuffleOrder.length == state.queue.length;
+        if (shuffleOn) {
+          final order = state.shuffleOrder;
+          final playPosition = List<int>.filled(order.length, 0);
+          for (var pos = 0; pos < order.length; pos++) {
+            final playlistIndex = order[pos];
+            if (playlistIndex >= 0 && playlistIndex < playPosition.length) {
+              playPosition[playlistIndex] = pos;
+            }
+          }
+          if (state.index >= 0 && state.index < playPosition.length) {
+            for (var pos = playPosition[state.index] + 1;
+                pos < order.length;
+                pos++) {
+              final playlistIndex = order[pos];
+              if (playlistIndex < 0 || playlistIndex >= state.queue.length) {
+                continue;
+              }
+              remainingQueue
+                  .add(_QueuedTrack(state.queue[playlistIndex], playlistIndex));
+            }
+          }
+        } else if (state.index >= 0 && state.index < state.queue.length - 1) {
+          for (var i = state.index + 1; i < state.queue.length; i++) {
+            remainingQueue.add(_QueuedTrack(state.queue[i], i));
+          }
         }
 
         // Filter and ensure diverse genre recommendations without same-title covers
@@ -690,8 +722,15 @@ class _UpNextModalSheet extends StatelessWidget {
               ),
             ],
           ),
+          // Judul + tombol tutup tetap terlihat (pinned); daftar antrean
+          // mengisi sisanya. ReorderableListView di dalam Expanded adalah
+          // SATU-SATUNYA scrollable — dulu ia bersarang di ListView ber-
+          // shrinkWrap + NeverScrollableScrollPhysics sehingga list tidak
+          // ikut auto-scroll saat drag (lagu tak bisa dipindah > ~1 layar).
+          // Material tembus pandang: ListTile menempelkan background/ink
+          // splash ke Material terdekat, tanpa ini splat tertutup
+          // DecoratedBox milik Container (assert debug Flutter).
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // Drag Handle
               Center(
@@ -740,171 +779,124 @@ class _UpNextModalSheet extends StatelessWidget {
               ),
               const Divider(height: 1),
 
-              // Content List
               Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  children: [
-                    // Sedang Diputar
-                    if (current != null) ...[
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
-                        child: Text(
-                          'SEDANG DIPUTAR',
-                          style: text.labelSmall?.copyWith(
-                            color: scheme.primary,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 1.0,
-                          ),
-                        ),
+                child: Material(
+                  type: MaterialType.transparency,
+                  child: Theme(
+                    data: Theme.of(context).copyWith(
+                      canvasColor: Colors.transparent,
+                      shadowColor: Colors.transparent,
+                    ),
+                    child: ReorderableListView.builder(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      buildDefaultDragHandles: false,
+                      itemCount: remainingQueue.length,
+                      onReorderItem: (oldIdx, newIdx) => cubit.reorderQueue(
+                        remainingQueue[oldIdx].index,
+                        remainingQueue[newIdx].index,
                       ),
-                      ListTile(
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-                        leading: ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: AlbumArt(url: current.artworkUrl, size: 50, radius: 8),
-                        ),
-                        title: Text(
-                          current.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: text.titleSmall?.copyWith(
-                            fontWeight: FontWeight.w700,
-                            color: scheme.primary,
-                          ),
-                        ),
-                        subtitle: Text(
-                          current.artist,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        trailing: Icon(Icons.graphic_eq_rounded, color: scheme.primary),
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-
-                    // Antrean Berikutnya
-                    if (remainingQueue.isNotEmpty) ...[
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
-                        child: Text(
-                          'BERIKUTNYA DALAM ANTREAN (${remainingQueue.length})',
-                          style: text.labelSmall?.copyWith(
-                            color: scheme.onSurfaceVariant,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 1.0,
-                          ),
-                        ),
-                      ),
-                      Theme(
-                        data: Theme.of(context).copyWith(
-                          canvasColor: Colors.transparent,
-                          shadowColor: Colors.transparent,
-                        ),
-                        child: ReorderableListView.builder(
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
-                          buildDefaultDragHandles: false,
-                          itemCount: remainingQueue.length,
-                          onReorderItem: (oldIdx, newIdx) {
-                            final actualOld = state.index + 1 + oldIdx;
-                            final actualNew = state.index + 1 + newIdx;
-                            cubit.reorderQueue(actualOld, actualNew);
-                          },
-                          itemBuilder: (context, idx) {
-                            final t = remainingQueue[idx];
-                            final trackIndexInQueue = state.index + 1 + idx;
-                            return Dismissible(
-                              key: ValueKey('queue-${t.id}-$trackIndexInQueue'),
-                              direction: DismissDirection.endToStart,
-                              background: Container(
-                                alignment: Alignment.centerRight,
-                                padding: const EdgeInsets.only(right: 20),
-                                color: scheme.errorContainer,
-                                child: Icon(Icons.delete_outline_rounded, color: scheme.error),
+                      header: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Sedang Diputar
+                          if (current != null) ...[
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+                              child: Text(
+                                'SEDANG DIPUTAR',
+                                style: text.labelSmall?.copyWith(
+                                  color: scheme.primary,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 1.0,
+                                ),
                               ),
-                              onDismissed: (_) {
-                                cubit.removeFromQueue(trackIndexInQueue);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text('Dihapus dari antrean: ${t.title}'),
-                                    duration: const Duration(seconds: 1),
-                                  ),
-                                );
-                              },
-                              child: ListTile(
-                                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-                                leading: ClipRRect(
-                                  borderRadius: BorderRadius.circular(8),
-                                  child: AlbumArt(url: t.artworkUrl, size: 44, radius: 8),
+                            ),
+                            ListTile(
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                              leading: ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: AlbumArt(url: current.artworkUrl, size: 50, radius: 8),
+                              ),
+                              title: Text(
+                                current.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: text.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                  color: scheme.primary,
                                 ),
-                                title: Text(
-                                  t.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: text.titleSmall?.copyWith(fontWeight: FontWeight.w600),
-                                ),
-                                subtitle: Text(t.artist, maxLines: 1, overflow: TextOverflow.ellipsis),
-                                trailing: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    IconButton(
-                                      icon: Icon(Icons.close_rounded, size: 18, color: scheme.outline),
-                                      tooltip: 'Hapus dari antrean',
-                                      onPressed: () => cubit.removeFromQueue(trackIndexInQueue),
-                                    ),
-                                    ReorderableDragStartListener(
-                                      index: idx,
-                                      child: Padding(
-                                        padding: const EdgeInsets.all(8.0),
-                                        child: Icon(Icons.drag_handle_rounded, size: 20, color: scheme.outline),
+                              ),
+                              subtitle: Text(
+                                current.artist,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              trailing: Icon(Icons.graphic_eq_rounded, color: scheme.primary),
+                            ),
+                            const SizedBox(height: 8),
+                          ],
+
+                          // Antrean Berikutnya
+                          if (remainingQueue.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      'BERIKUTNYA DALAM ANTREAN (${remainingQueue.length})',
+                                      style: text.labelSmall?.copyWith(
+                                        color: scheme.onSurfaceVariant,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: 1.0,
                                       ),
                                     ),
-                                  ],
-                                ),
-                                onTap: () => cubit.playQueue(state.queue, trackIndexInQueue),
+                                  ),
+                                  if (shuffleOn)
+                                    Text(
+                                      'URUTAN ACAK',
+                                      style: text.labelSmall?.copyWith(
+                                        color: scheme.secondary,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: 1.0,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          if (shuffleOn && remainingQueue.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                              child: Text(
+                                'Urutan mengikuti mode acak. Matikan Acak untuk mengubah urutan.',
+                                style: text.bodySmall?.copyWith(color: scheme.outline),
+                              ),
+                            ),
+                        ],
+                      ),
+                      itemBuilder: (context, idx) {
+                        final queued = remainingQueue[idx];
+                        final t = queued.track;
+                        final trackIndexInQueue = queued.index;
+                        return Dismissible(
+                          key: ValueKey('queue-${t.id}-$trackIndexInQueue'),
+                          direction: DismissDirection.endToStart,
+                          background: Container(
+                            alignment: Alignment.centerRight,
+                            padding: const EdgeInsets.only(right: 20),
+                            color: scheme.errorContainer,
+                            child: Icon(Icons.delete_outline_rounded, color: scheme.error),
+                          ),
+                          onDismissed: (_) {
+                            cubit.removeFromQueue(trackIndexInQueue);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('Dihapus dari antrean: ${t.title}'),
+                                duration: const Duration(seconds: 1),
                               ),
                             );
                           },
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-
-                    // Rekomendasi Genre Terkait
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
-                      child: Row(
-                        children: [
-                          Text(
-                            'REKOMENDASI GENRE TERKAIT',
-                            style: text.labelSmall?.copyWith(
-                              color: scheme.secondary,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 1.0,
-                            ),
-                          ),
-                          const Spacer(),
-                          Text(
-                            'Acak & Beragam',
-                            style: text.labelSmall?.copyWith(color: scheme.outline),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    if (filteredRecomms.isEmpty)
-                      Padding(
-                        padding: const EdgeInsets.all(24),
-                        child: Center(
-                          child: Text(
-                            'Sedang menyiapkan rekomendasi genre serupa...',
-                            style: text.bodySmall?.copyWith(color: scheme.outline),
-                          ),
-                        ),
-                      )
-                    else
-                      ...filteredRecomms.map((t) => ListTile(
+                          child: ListTile(
                             contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
                             leading: ClipRRect(
                               borderRadius: BorderRadius.circular(8),
@@ -917,30 +909,126 @@ class _UpNextModalSheet extends StatelessWidget {
                               style: text.titleSmall?.copyWith(fontWeight: FontWeight.w600),
                             ),
                             subtitle: Text(t.artist, maxLines: 1, overflow: TextOverflow.ellipsis),
-                            trailing: IconButton(
-                              icon: Icon(Icons.playlist_add_rounded, color: scheme.primary),
-                              tooltip: 'Tambah ke antrean',
-                              onPressed: () {
-                                cubit.playUpNext(t);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text('Ditambahkan ke antrean: ${t.title}'),
-                                    duration: const Duration(seconds: 1),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  icon: Icon(Icons.close_rounded, size: 18, color: scheme.outline),
+                                  tooltip: 'Hapus dari antrean',
+                                  onPressed: () => cubit.removeFromQueue(trackIndexInQueue),
+                                ),
+                                // Saat acak aktif urutan yang tampil adalah urutan putar
+                                // engine, dan just_audio tidak menyediakan API untuk
+                                // menulis ulang urutan acak dari aplikasi. Jadi drag
+                                // dimatikan (bukan dibiarkan memindah urutan yang salah)
+                                // dan diganti ikon penanda.
+                                if (shuffleOn)
+                                  Padding(
+                                    padding: const EdgeInsets.all(8.0),
+                                    child: Tooltip(
+                                      message: 'Urutan mengikuti mode acak',
+                                      child: Icon(
+                                        Icons.shuffle_rounded,
+                                        size: 20,
+                                        color: scheme.outline,
+                                      ),
+                                    ),
+                                  )
+                                else
+                                  ReorderableDragStartListener(
+                                    index: idx,
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(8.0),
+                                      child: Icon(
+                                        Icons.drag_handle_rounded,
+                                        size: 20,
+                                        color: scheme.outline,
+                                      ),
+                                    ),
                                   ),
-                                );
-                              },
+                              ],
                             ),
-                            onTap: () async {
-                              // Sisipkan tepat setelah lagu aktif lalu lompat ke
-                              // sana. Sebelumnya memakai
-                              // playQueue([...queue, t], queue.length) yang
-                              // membangun ulang seluruh playlist ExoPlayer
-                              // (audio terputus + media session/notifikasi reset).
-                              await cubit.playUpNext(t);
-                              await cubit.next();
-                            },
-                          )),
-                  ],
+                            onTap: () => cubit.playQueue(state.queue, trackIndexInQueue),
+                          ),
+                        );
+                      },
+                      footer: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Rekomendasi Genre Terkait
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+                            child: Row(
+                              children: [
+                                Text(
+                                  'REKOMENDASI GENRE TERKAIT',
+                                  style: text.labelSmall?.copyWith(
+                                    color: scheme.secondary,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: 1.0,
+                                  ),
+                                ),
+                                const Spacer(),
+                                Text(
+                                  'Acak & Beragam',
+                                  style: text.labelSmall?.copyWith(color: scheme.outline),
+                                ),
+                              ],
+                            ),
+                          ),
+
+                          if (filteredRecomms.isEmpty)
+                            Padding(
+                              padding: const EdgeInsets.all(24),
+                              child: Center(
+                                child: Text(
+                                  'Sedang menyiapkan rekomendasi genre serupa...',
+                                  style: text.bodySmall?.copyWith(color: scheme.outline),
+                                ),
+                              ),
+                            )
+                          else
+                            ...filteredRecomms.map((t) => ListTile(
+                                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+                                  leading: ClipRRect(
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: AlbumArt(url: t.artworkUrl, size: 44, radius: 8),
+                                  ),
+                                  title: Text(
+                                    t.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: text.titleSmall?.copyWith(fontWeight: FontWeight.w600),
+                                  ),
+                                  subtitle: Text(t.artist, maxLines: 1, overflow: TextOverflow.ellipsis),
+                                  trailing: IconButton(
+                                    icon: Icon(Icons.playlist_add_rounded, color: scheme.primary),
+                                    tooltip: 'Tambah ke antrean',
+                                    onPressed: () {
+                                      cubit.playUpNext(t);
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(
+                                          content: Text('Ditambahkan ke antrean: ${t.title}'),
+                                          duration: const Duration(seconds: 1),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                  onTap: () async {
+                                    // Sisipkan tepat setelah lagu aktif lalu lompat ke
+                                    // sana. Sebelumnya memakai playQueue([...queue, t],
+                                    // queue.length) yang membangun ulang seluruh
+                                    // playlist ExoPlayer (audio terputus + media
+                                    // session/notifikasi reset); kini memakai lompatan
+                                    // indeks playlist eksplisit supaya tetap benar saat
+                                    // Acak aktif (next() akan mengikuti urutan acak).
+                                    await cubit.playRecommendationNow(t);
+                                  },
+                                )),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ],
@@ -949,6 +1037,18 @@ class _UpNextModalSheet extends StatelessWidget {
       },
     );
   }
+}
+
+/// Satu lagu di antrean beserta indeksnya di dalam [PlayerState.queue].
+///
+/// Daftar "berikutnya" bisa ditampilkan dalam urutan acak, jadi track tidak
+/// boleh diidentifikasi lewat posisinya di layar — [index] menyimpan indeks
+/// playlist yang benar untuk operasi putar/hapus/reorder.
+class _QueuedTrack {
+  final Track track;
+  final int index;
+
+  const _QueuedTrack(this.track, this.index);
 }
 
 // ==========================================

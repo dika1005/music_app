@@ -42,6 +42,15 @@ class PlayerState extends Equatable {
   final String repeat; // off | one | all
   final String? message;
 
+  /// Urutan putar yang sedang dipakai engine audio saat acak aktif:
+  /// [shuffleOrder]\[i] = indeks di dalam [queue] untuk posisi putar ke-i.
+  ///
+  /// Daftar "BERIKUTNYA DALAM ANTREAN" memakai ini supaya saat acak aktif ia
+  /// menampilkan lagu yang benar-benar akan diputar (urutan posisi [queue] bisa
+  /// berbeda dari urutan putar engine). Kosong bila acak tidak aktif / playlist
+  /// belum dimuat.
+  final List<int> shuffleOrder;
+
   const PlayerState({
     this.status = PlayerStatus.initial,
     this.queue = const [],
@@ -50,6 +59,7 @@ class PlayerState extends Equatable {
     this.shuffle = false,
     this.repeat = 'off',
     this.message,
+    this.shuffleOrder = const [],
   });
 
   Track? get current => queue.isEmpty || index >= queue.length ? null : queue[index];
@@ -62,6 +72,7 @@ class PlayerState extends Equatable {
     bool? shuffle,
     String? repeat,
     String? message,
+    List<int>? shuffleOrder,
   }) =>
       PlayerState(
         status: status ?? this.status,
@@ -71,8 +82,10 @@ class PlayerState extends Equatable {
         shuffle: shuffle ?? this.shuffle,
         repeat: repeat ?? this.repeat,
         message: message ?? this.message,
+        shuffleOrder: shuffleOrder ?? this.shuffleOrder,
       );
 
   @override
-  List<Object?> get props => [status, queue, index, upNext, shuffle, repeat, message];
+  List<Object?> get props =>
+      [status, queue, index, upNext, shuffle, repeat, message, shuffleOrder];
 }

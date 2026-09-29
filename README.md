@@ -152,7 +152,9 @@ flutter test
 ```
 
 Test penting: `test/player_queue_test.dart` (antrean: auto-lanjut, reorder,
-pemangkasan riwayat), `test/lyrics_sync_test.dart` (parser + regresi drift
+pemangkasan riwayat, sinkronisasi urutan acak engine), `test/up_next_sheet_test.dart`
+(sheet Up Next: satu scrollable untuk drag + daftar mengikuti urutan acak),
+`test/lyrics_sync_test.dart` (parser + regresi drift
 auto-scroll), `test/player_notification_test.dart` (media item notifikasi),
 `test/optimization_test.dart`, `test/home_blocks_test.dart`,
 `test/search_cubit_test.dart`, `test/library_cubit_test.dart`.
@@ -162,12 +164,16 @@ auto-scroll), `test/player_notification_test.dart` (media item notifikasi),
 
 - **Android < 13**: notifikasi hanya bisa memuat aksi ber-keycode → tidak ada tombol
   acak di notifikasi (batasan OS). Next/prev tetap ada.
-- **Shuffle aktif**: urutan acak dijalankan engine audio, sedangkan daftar
-  "BERIKUTNYA DALAM ANTREAN" menampilkan urutan posisi — bisa menyesatkan, dan
-  edit/hapus antrean saat shuffle aktif berisiko desync. Workaround: matikan
-  shuffle dulu sebelum mengubah antrean.
-- **Reorder jarak jauh**: drag lagu lebih dari ~1 layar sulit karena list antrean
-  bersarang (tidak auto-scroll saat drag). Geser 1–2 posisi masih normal.
+- **Acak aktif**: daftar "BERIKUTNYA DALAM ANTREAN" sudah mengikuti urutan putar
+  engine (`shuffleIndices`, ditandai chip "URUTAN ACAK") sehingga tidak lagi
+  menampilkan lagu yang salah. Namun **drag untuk mengubah urutan dimatikan saat
+  Acak aktif** (ikon drag diganti penanda acak) karena just_audio tidak
+  menyediakan API untuk menulis ulang urutan acaknya dari aplikasi. Hapus lagu
+  dan putar lagu dari daftar tetap aman karena memakai indeks playlist, bukan
+  posisi tampilan. Untuk mengubah urutan: matikan Acak dulu.
+- List antrean kini menjadi satu-satunya scrollable di sheet Up Next, jadi
+  auto-scroll saat drag sudah bekerja untuk jarak jauh (dulu bersarang di dalam
+  `ListView` ber-`NeverScrollableScrollPhysics`).
 
 ## Dokumen perancangan
 

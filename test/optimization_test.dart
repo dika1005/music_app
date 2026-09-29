@@ -69,7 +69,7 @@ void main() {
         queue: [Track(id: 'a', title: 'A', artist: 'B')],
       );
       expect(state.props.whereType<Duration>(), isEmpty);
-      expect(state.props.length, 7, reason: 'status, queue, index, upNext, shuffle, repeat, message');
+      expect(state.props.length, 8, reason: 'status, queue, index, upNext, shuffle, repeat, message, shuffleOrder');
     });
 
     test('PositionData: progress 0..1 dan aman saat durasi 0', () {
