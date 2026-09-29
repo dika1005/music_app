@@ -31,6 +31,14 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // FIX crash release "Invalid notification (no valid small icon)":
+            // ikon notifikasi `drawable/ic_stat_music` sempat hilang dari APK
+            // (aapt tidak menemukan resource drawable/ic_stat_music sama sekali)
+            // karena penyusutan resource menghapus vector yang hanya dirujuk
+            // lewat string dari Dart ("drawable/ic_stat_music"). Matikan
+            // penyusutan + pasang keep.xml supaya ikon selalu ikut terkemas.
+            isShrinkResources = false
+            isMinifyEnabled = false
         }
     }
 }
