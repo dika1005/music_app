@@ -391,6 +391,12 @@ class _PlayerAudioHandler extends BaseAudioHandler
 
   Future<AudioPlayerPlatform> get _player => _playerCompleter.future;
   int? index;
+
+  /// AUDIT FIX (patch #5): fallback queueIndex untuk _broadcastState().
+  /// `_justAudioEvent.currentIndex` masih null sampai event playback pertama
+  /// dari ExoPlayer tiba, sehingga notifikasi sempat tanpa queueIndex
+  /// (tombol prev/next disembunyikan SystemUI Android 13+).
+  int? queueIndexFallback;
   MediaItem? get currentMediaItem =>
       index != null && index! >= 0 && index! < currentQueue.length
           ? currentQueue[index!]
@@ -464,6 +470,16 @@ class _PlayerAudioHandler extends BaseAudioHandler
     _source = request.audioSourceMessage;
     _updateShuffleIndices();
     _updateQueue();
+    // AUDIT FIX (patch #5): dorong metadata + state SEGERA saat load, jangan
+    // tunggu event playback pertama (yang datang ~100ms kemudian + debounce).
+    // Tanpa ini notifikasi sempat polos/tanpa tombol saat lagu baru dimuat.
+    index = request.initialIndex ?? index;
+    final q = currentQueue;
+    if (mediaItem.nvalue == null && index != null && index! >= 0 && index! < q.length) {
+      mediaItem.add(q[index!]);
+    }
+    queueIndexFallback = index;
+    _broadcastStateIfActive();
     final response = await (await _player).load(LoadRequest(
       audioSourceMessage: _source!,
       initialPosition: request.initialPosition,
@@ -638,6 +654,7 @@ class _PlayerAudioHandler extends BaseAudioHandler
 
   @override
   Future<void> skipToQueueItem(int index) async {
+    queueIndexFallback = index;
     (await _player).seek(SeekRequest(position: Duration.zero, index: index));
   }
 
@@ -832,7 +849,32 @@ class _PlayerAudioHandler extends BaseAudioHandler
   /// `shuffleMode`/`repeatMode` dilaporkan supaya chip acak/ulang bawaan sistem
   /// (yang sudah diaktifkan audio_service lewat AUTO_ENABLED_ACTIONS) sinkron
   /// dengan aplikasi. Perubahan dari chip itu kembali ke aplikasi lewat patch #4.
+  ///
+  /// Patch #5 (audit notifikasi): queueIndex fallback + dorong metadata/state
+  /// segera saat customLoad, supaya tombol prev/next + judul langsung muncul
+  /// tanpa menunggu event ExoPlayer pertama.
   void _broadcastState() {
+    // Urutan control menentukan index compact [0,1,2] di bawah:
+    // 0 = prev, 1 = play/pause, 2 = next.
+    //
+    // CATATAN hasil audit native (audio_service 0.18.19 AudioService.java):
+    // `buildNotification()` hanya memakai `nativeActions`; kontrol dengan
+    // `customAction != null` masuk ke `customActions` PlaybackStateCompat dan
+    // TIDAK PERNAH dirender sebagai tombol notifikasi. Jadi tombol shuffle
+    // kustom (MediaControl.custom) sengaja TIDAK dipasang — ia tidak akan
+    // muncul di notifikasi versi Android mana pun.
+    //
+    // Shuffle/repeat tetap sinkron dua arah lewat bit SET_SHUFFLE_MODE /
+    // SET_REPEAT_MODE di systemActions + pelaporan shuffleMode/repeatMode:
+    // - Android 13+: chip acak/ulang bawaan SystemUI (panel QS expanded).
+    // - Android Auto / Wear / Bluetooth AVRCP: mengikuti status yang dilaporkan.
+    // - Di aplikasi: sinkronisasi balik lewat _ModeEvent (patch #4).
+    //
+    // Tombol fisik yang HILANG di laporan user (next/prev) tidak disebabkan
+    // kode di sini — ketiganya selalu dikirim sebagai native control. Kalau
+    // masih hilang di HP, penyebabnya di luar Dart (lihat komentar di bawah
+    // soal targetSdk 35 + edisi APK). Jangan menambah MediaControl.custom
+    // untuk prev/next/shuffle — itu justru memperparah.
     final controls = [
       MediaControl.skipToPrevious,
       if (_playing) MediaControl.pause else MediaControl.play,
@@ -844,13 +886,16 @@ class _PlayerAudioHandler extends BaseAudioHandler
         MediaAction.seek,
         MediaAction.seekForward,
         MediaAction.seekBackward,
-        // Bit aksi supaya Android 13+ menampilkan tombol acak/ulang bawaannya.
+        // Bit aksi supaya Android 13+ menampilkan tombol bawaan prev/next +
+        // seek bar, dan chip acak/ulang di panel QS yang di-expand sinkron.
         // systemActions hanya jadi bitmask PlaybackState, bukan tombol tambahan.
         MediaAction.setShuffleMode,
         MediaAction.setRepeatMode,
         MediaAction.skipToNext,
         MediaAction.skipToPrevious,
       },
+      // Compact view (notifikasi collapsed) hanya muat 3: prev/play/next.
+      // Shuffle tetap bisa diakses dari notifikasi expanded (index 3).
       androidCompactActionIndices: const [0, 1, 2],
       shuffleMode: _shuffleMode,
       repeatMode: _repeatMode,
@@ -872,7 +917,8 @@ class _PlayerAudioHandler extends BaseAudioHandler
       updatePosition: currentPosition,
       bufferedPosition: _justAudioEvent.bufferedPosition,
       speed: _speed,
-      queueIndex: _justAudioEvent.currentIndex,
+      // Pakai fallback saat event ExoPlayer belum datang (lihat patch #5).
+      queueIndex: _justAudioEvent.currentIndex ?? queueIndexFallback ?? index,
       errorCode: _justAudioEvent.errorCode,
       errorMessage: _justAudioEvent.errorMessage,
     ));

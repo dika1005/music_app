@@ -66,8 +66,18 @@ class LocalAudioStreamServer {
   bool hasCachedUrl(String videoId) => getCachedUrl(videoId) != null;
 
   String getStreamUri(String videoId) {
-    if (_port == 0) return '';
+    if (_port == 0 || videoId.isEmpty) return '';
     return 'http://127.0.0.1:$_port/stream/$videoId';
+  }
+
+  /// Dipakai AppAudioHandler untuk memastikan server siap sebelum
+  /// AudioSource dibuat. Kalau bind awal gagal (port 0), coba sekali lagi
+  /// supaya tidak ada AudioSource dengan URI kosong ('') yang dikirim ke
+  /// ExoPlayer — itu yang menyebabkan native crash / force close.
+  Future<bool> ensureStarted() async {
+    if (_server != null && _port != 0) return true;
+    await start();
+    return _server != null && _port != 0;
   }
 
   Future<void> _handleRequest(HttpRequest request) async {

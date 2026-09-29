@@ -9,9 +9,22 @@ import 'package:music_app/shared/audio_service/local_audio_stream_server.dart';
 /// audio focus (call/notif), pre-buffer lagu berikutnya, dan loopback server
 /// untuk memastikan semua tombol navigasi (next/prev) di notifikasi selalu aktif.
 class AppAudioHandler {
-  AppAudioHandler() : _player = AudioPlayer();
+  AppAudioHandler();
 
-  final AudioPlayer _player;
+  AudioPlayer? _player;
+  AudioPlayer get player {
+    final p = _player;
+    if (p == null) {
+      throw StateError(
+        'AppAudioHandler belum di-init (AudioPlayer dibuat setelah '
+        'JustAudioBackground.init agar tidak premature).',
+      );
+    }
+    return p;
+  }
+
+  /// Null-safe untuk pemakaian UI sebelum init selesai.
+  AudioPlayer? get playerOrNull => _player;
   final LocalAudioStreamServer _server = LocalAudioStreamServer();
 
   void Function(Duration pos, Duration dur)? onPosition;
@@ -30,35 +43,45 @@ class AppAudioHandler {
   String _repeat = 'off';
 
   LocalAudioStreamServer get server => _server;
-  AudioPlayer get player => _player;
-  int get playlistLength => _player.audioSources.length;
+  int get playlistLength => _player?.audioSources.length ?? 0;
 
   Future<void> init({Future<String?> Function(String videoId)? onResolveUrl}) async {
     _server.onResolveUrl = onResolveUrl;
     await _server.start();
 
+    // Player dibuat LAZY di sini (setelah JustAudioBackground.init di main).
+    final p = AudioPlayer();
+    _player = p;
+
     final session = await AudioSession.instance;
     await session.configure(const AudioSessionConfiguration.music());
-    session.becomingNoisyEventStream.listen((_) => _player.pause());
+    session.becomingNoisyEventStream.listen((_) {
+      try {
+        p.pause();
+      } catch (_) {}
+    });
     session.interruptionEventStream.listen((e) {
-      if (e.begin) {
-        _player.pause();
-      } else if (e.type == AudioInterruptionType.pause ||
-          e.type == AudioInterruptionType.duck) {
-        _player.play();
-      }
+      try {
+        if (e.begin) {
+          p.pause();
+        } else if (e.type == AudioInterruptionType.pause ||
+            e.type == AudioInterruptionType.duck) {
+          p.play();
+        }
+      } catch (_) {}
     });
 
-    _player.playbackEventStream.listen(
+    p.playbackEventStream.listen(
       (_) {},
       onError: (Object e, StackTrace st) {
+        debugPrint('playbackEvent error: $e');
         onStatus?.call(false, false);
       },
     );
-    _player.positionStream.listen((pos) {
-      onPosition?.call(pos, _player.duration ?? Duration.zero);
+    p.positionStream.listen((pos) {
+      onPosition?.call(pos, p.duration ?? Duration.zero);
     });
-    _player.playerStateStream.listen((s) {
+    p.playerStateStream.listen((s) {
       final buffering = s.processingState == ProcessingState.loading ||
           s.processingState == ProcessingState.buffering;
       onStatus?.call(s.playing, buffering);
@@ -70,23 +93,23 @@ class AppAudioHandler {
       // menutup media session + notifikasi (lihat AudioService.setState() di
       // audio_service 0.18.19: `if (oldState != idle && state == idle) stop()`).
       // Cek lewat `adb logcat | grep "\[audio\]"` kalau notifikasi hilang.
-      _player.processingStateStream.distinct().listen(
+      p.processingStateStream.distinct().listen(
             (state) => debugPrint(
               '[audio] processingState=$state',
             ),
           );
     }
-    _player.currentIndexStream.listen((idx) {
+    p.currentIndexStream.listen((idx) {
       if (idx != null) {
         onIndexChanged?.call(idx);
       }
     });
     // Perubahan acak/ulang dari notifikasi / panel media sistem mengalir ke
     // client just_audio lewat playerDataMessageStream, lalu ke stream ini.
-    _player.shuffleModeEnabledStream.distinct().listen((enabled) {
+    p.shuffleModeEnabledStream.distinct().listen((enabled) {
       onShuffleChanged?.call(enabled);
     });
-    _player.loopModeStream.distinct().listen((mode) {
+    p.loopModeStream.distinct().listen((mode) {
       onRepeatChanged?.call(
         mode == LoopMode.one ? 'one' : mode == LoopMode.all ? 'all' : 'off',
       );
@@ -104,25 +127,53 @@ class AppAudioHandler {
     final uriString = t.streamUrl.isNotEmpty
         ? t.streamUrl
         : _server.getStreamUri(t.id);
+    // Guard anti force-close: URI kosong JANGAN dikirim ke ExoPlayer.
+    if (uriString.isEmpty) {
+      throw ArgumentError(
+        'Tidak ada streamUri untuk "${t.title}" (id=${t.id}, '
+        'serverPort=${_server.port})',
+      );
+    }
+    Uri? artUri;
+    final rawArt = t.artworkUrl?.trim() ?? '';
+    if (rawArt.isNotEmpty) {
+      final parsed = Uri.tryParse(rawArt);
+      if (parsed != null && parsed.hasScheme) artUri = parsed;
+    }
+    final title = t.title.trim().isEmpty ? 'Unknown title' : t.title.trim();
+    final artist =
+        t.artist.trim().isEmpty ? 'Unknown artist' : t.artist.trim();
     return AudioSource.uri(
       Uri.parse(uriString),
       headers: _streamHeaders,
       tag: MediaItem(
-        id: t.id,
-        title: t.title,
-        artist: t.artist,
-        album: t.album ?? 'MelodyFlow',
+        id: t.id.isEmpty ? uriString : t.id,
+        title: title,
+        artist: artist,
+        album: (t.album == null || t.album!.trim().isEmpty)
+            ? 'MelodyFlow'
+            : t.album!.trim(),
         duration: t.duration == Duration.zero ? null : t.duration,
-        artUri: t.artworkUrl == null ? null : Uri.tryParse(t.artworkUrl!),
+        artUri: artUri,
       ),
     );
   }
 
   Future<void> playQueue(List<Track> tracks, int start) async {
+    final p = _player;
+    if (p == null) {
+      onStatus?.call(false, false);
+      throw StateError('AudioPlayer belum di-init.');
+    }
     try {
       if (tracks.isEmpty) {
         onStatus?.call(false, false);
         return;
+      }
+      final serverOk = await _server.ensureStarted();
+      if (!serverOk) {
+        onStatus?.call(false, false);
+        throw StateError('LocalAudioStreamServer gagal start (port 0).');
       }
       final safeStart = start.clamp(0, tracks.length - 1);
       final sources = <AudioSource>[];
@@ -137,8 +188,8 @@ class AppAudioHandler {
         return;
       }
 
-      await _player.setAudioSources(sources, initialIndex: safeStart);
-      await _player.play();
+      await p.setAudioSources(sources, initialIndex: safeStart);
+      await p.play();
     } catch (_) {
       onStatus?.call(false, false);
       rethrow;
@@ -147,13 +198,15 @@ class AppAudioHandler {
 
   /// Masukkan lagu baru ke dalam playlist antrean tepat di posisi targetIndex
   Future<void> insertTrack(int index, Track track) async {
+    final p = _player;
+    if (p == null) return;
     try {
-      if (_player.audioSources.isEmpty) {
+      if (p.audioSources.isEmpty) {
         return;
       }
       final source = _createAudioSource(track);
-      final safeIndex = index.clamp(0, _player.audioSources.length);
-      await _player.insertAudioSource(safeIndex, source);
+      final safeIndex = index.clamp(0, p.audioSources.length);
+      await p.insertAudioSource(safeIndex, source);
     } catch (e) {
       debugPrint('Error inserting track to playlist: $e');
     }
@@ -161,12 +214,14 @@ class AppAudioHandler {
 
   /// Tambahkan lagu ke ujung akhir playlist antrean
   Future<void> addTrack(Track track) async {
+    final p = _player;
+    if (p == null) return;
     try {
-      if (_player.audioSources.isEmpty) {
+      if (p.audioSources.isEmpty) {
         return;
       }
       final source = _createAudioSource(track);
-      await _player.addAudioSource(source);
+      await p.addAudioSource(source);
     } catch (e) {
       debugPrint('Error adding track to playlist: $e');
     }
@@ -174,9 +229,11 @@ class AppAudioHandler {
 
   /// Hapus lagu dari antrean audio berdasarkan indeks
   Future<void> removeTrackAt(int index) async {
+    final p = _player;
+    if (p == null) return;
     try {
-      if (index < 0 || index >= _player.audioSources.length) return;
-      await _player.removeAudioSourceAt(index);
+      if (index < 0 || index >= p.audioSources.length) return;
+      await p.removeAudioSourceAt(index);
     } catch (e) {
       debugPrint('Error removing track from playlist: $e');
     }
@@ -184,24 +241,25 @@ class AppAudioHandler {
 
   /// Pindahkan urutan lagu di dalam antrean audio
   Future<void> moveTrack(int currentIndex, int newIndex) async {
+    final p = _player;
+    if (p == null) return;
     try {
       if (currentIndex < 0 ||
-          currentIndex >= _player.audioSources.length ||
+          currentIndex >= p.audioSources.length ||
           newIndex < 0 ||
-          newIndex >= _player.audioSources.length) {
+          newIndex >= p.audioSources.length) {
         return;
       }
-      await _player.moveAudioSource(currentIndex, newIndex);
+      await p.moveAudioSource(currentIndex, newIndex);
     } catch (e) {
       debugPrint('Error moving track in playlist: $e');
     }
   }
 
 
-  /// Matikan audio secara instan (<1ms) saat user berpindah lagu
   Future<void> stopImmediately() async {
     try {
-      await _player.pause();
+      await _player?.pause();
     } catch (_) {}
   }
 
@@ -212,10 +270,12 @@ class AppAudioHandler {
   /// processingState menjadi `idle`, dan audio_service memang menutup media
   /// session + notifikasi saat idle — persis yang diinginkan di kasus ini.
   Future<void> clearQueue() async {
+    final p = _player;
+    if (p == null) return;
     try {
-      if (_player.audioSources.isEmpty) return;
-      await _player.stop();
-      await _player.clearAudioSources();
+      if (p.audioSources.isEmpty) return;
+      await p.stop();
+      await p.clearAudioSources();
     } catch (e) {
       debugPrint('Error clearing playlist: $e');
     }
@@ -224,40 +284,104 @@ class AppAudioHandler {
   /// Buang sebagian lagu dari playlist engine (dipakai untuk memangkas riwayat
   /// antrean yang sudah terlalu panjang).
   Future<void> removeTrackRange(int start, int end) async {
+    final p = _player;
+    if (p == null) return;
     try {
-      if (start < 0 || end <= start || end > _player.audioSources.length) return;
-      await _player.removeAudioSourceRange(start, end);
+      if (start < 0 || end <= start || end > p.audioSources.length) return;
+      await p.removeAudioSourceRange(start, end);
     } catch (e) {
       debugPrint('Error removing track range from playlist: $e');
     }
   }
 
-  Future<void> toggle() => _player.playing ? _player.pause() : _player.play();
-
-  Future<void> skipTo(int index) async {
-    if (index < 0 || index >= _player.audioSources.length) return;
-    await _player.seek(Duration.zero, index: index);
-    if (!_player.playing) {
-      await _player.play();
+  Future<void> toggle() async {
+    final p = _player;
+    if (p == null) return;
+    try {
+      await (p.playing ? p.pause() : p.play());
+    } catch (e) {
+      debugPrint('toggle error: $e');
+      onStatus?.call(false, false);
     }
   }
 
-  Future<void> next() => _player.seekToNext();
-  Future<void> previous() => _player.seekToPrevious();
-  Future<void> seek(Duration pos) => _player.seek(pos);
+  Future<void> skipTo(int index) async {
+    final p = _player;
+    if (p == null) return;
+    if (index < 0 || index >= p.audioSources.length) return;
+    await p.seek(Duration.zero, index: index);
+    if (!p.playing) {
+      await p.play();
+    }
+  }
+
+  Future<void> next() async {
+    try {
+      await _player?.seekToNext();
+    } catch (e) {
+      debugPrint('next error: $e');
+    }
+  }
+
+  Future<void> previous() async {
+    try {
+      await _player?.seekToPrevious();
+    } catch (e) {
+      debugPrint('previous error: $e');
+    }
+  }
+
+  Future<void> seek(Duration pos) async {
+    try {
+      await _player?.seek(pos);
+    } catch (e) {
+      debugPrint('seek error: $e');
+    }
+  }
 
   void setShuffle(bool enabled) {
-    _player.setShuffleModeEnabled(enabled);
+    try {
+      _player?.setShuffleModeEnabled(enabled);
+    } catch (e) {
+      debugPrint('setShuffle error: $e');
+    }
   }
 
   void setRepeat(String mode) {
     _repeat = mode;
-    _player.setLoopMode(mode == 'one' ? LoopMode.one : mode == 'all' ? LoopMode.all : LoopMode.off);
+    try {
+      _player?.setLoopMode(mode == 'one'
+          ? LoopMode.one
+          : mode == 'all'
+              ? LoopMode.all
+              : LoopMode.off);
+    } catch (e) {
+      debugPrint('setRepeat error: $e');
+    }
   }
 
-  bool get hasNext => _player.hasNext;
-  bool get hasPrevious => _player.hasPrevious;
-  bool get isPlaying => _player.playing;
+  bool get hasNext => _player?.hasNext ?? false;
+  bool get hasPrevious => _player?.hasPrevious ?? false;
+  bool get isPlaying => _player?.playing ?? false;
 
   String get repeat => _repeat;
+
+  /// Dipanggil saat aplikasi di-swipe tutup (detached) dalam keadaan pause:
+  /// hentikan service supaya notifikasi tidak nyangkut.
+  Future<void> stopService() async {
+    try {
+      await _player?.stop();
+    } catch (_) {}
+  }
+
+  Future<void> dispose() async {
+    try {
+      await _player?.stop();
+      await _player?.dispose();
+    } catch (_) {}
+    _player = null;
+    try {
+      await _server.stop();
+    } catch (_) {}
+  }
 }

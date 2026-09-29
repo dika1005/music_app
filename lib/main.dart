@@ -18,13 +18,11 @@ Future<void> main() async {
     // Ikon monokrom khusus notifikasi. "mipmap/ic_launcher" (default) dirender
     // sebagai siluet kotak di Android 13+ karena bukan ikon status bar.
     androidNotificationIcon: 'drawable/ic_stat_music',
-    androidNotificationOngoing: true,
-    // Jangan turunkan priority service saat pause. Dengan `true` (default
-    // audio_service), notifikasi dilepas dari status foreground setiap kali
-    // playback di-pause — dan aplikasi ini mem-pause lagu di hampir setiap
-    // perpindahan lagu (lihat AppAudioHandler.stopImmediately) sehingga
-    // notifikasi pemutaran mudah hilang/dibuang sistem.
-    androidStopForegroundOnPause: false,
+    androidNotificationOngoing: false,
+    // true = saat pause, service lepas dari foreground sehingga notifikasi
+    // bisa di-swipe hilang & tidak nyangkut setelah apk di-close.
+    // Saat playing, audio_service tetap menjadikannya foreground ongoing.
+    androidStopForegroundOnPause: true,
     androidShowNotificationBadge: true,
     notificationColor: const Color(0xFF14B8A6),
   );
@@ -38,8 +36,42 @@ Future<void> main() async {
 }
 
 /// Root: dark-only M3 theme + GoRouter + cubits global (player, library, profile).
-class MelodyFlowApp extends StatelessWidget {
+class MelodyFlowApp extends StatefulWidget {
   const MelodyFlowApp({super.key});
+
+  @override
+  State<MelodyFlowApp> createState() => _MelodyFlowAppState();
+}
+
+class _MelodyFlowAppState extends State<MelodyFlowApp>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Kalau user swipe-close aplikasi saat pause/stop, hentikan service supaya
+    // notifikasi tidak nyangkut. Kalau sedang playing, biarkan hidup (musik
+    // tetap jalan di background — perilaku standar pemutar musik).
+    if (state == AppLifecycleState.detached) {
+      try {
+        final audio = sl<PlayerCubit>().audio;
+        if (!audio.isPlaying) {
+          // ignore: discarded_futures
+          audio.stopService();
+        }
+      } catch (_) {}
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
